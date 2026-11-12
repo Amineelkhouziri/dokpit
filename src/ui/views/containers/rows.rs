@@ -2,6 +2,7 @@ use bollard::models::{ContainerSummary, ContainerSummaryStateEnum as State};
 use relm4::adw::{self, prelude::*};
 use relm4::{ComponentSender, gtk, gtk::glib};
 
+use super::group::Op;
 use super::{ContainersView, Msg};
 use crate::core::{self, Group};
 
@@ -30,8 +31,21 @@ pub fn group_header(group: &Group, open: bool, sender: &Sender) -> gtk::Box {
     header
 }
 
-pub fn group_actions(_group: &Group, _sender: &Sender) -> gtk::Box {
-    gtk::Box::new(gtk::Orientation::Horizontal, 6)
+pub fn group_actions(group: &Group, sender: &Sender) -> gtk::Box {
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let Some(project) = &group.project else { return actions };
+    for (op, icon, tooltip) in [
+        (Op::Start, "media-playback-start-symbolic", "Start project containers"),
+        (Op::Stop, "media-playback-stop-symbolic", "Stop project containers"),
+        (Op::Restart, "view-refresh-symbolic", "Restart project containers"),
+        (Op::Remove, "user-trash-symbolic", "Remove project containers"),
+    ] {
+        let b = gtk::Button::builder().icon_name(icon).tooltip_text(tooltip).css_classes(["flat"]).build();
+        let (s, project) = (sender.clone(), project.clone());
+        b.connect_clicked(move |_| s.input(Msg::Group(op, project.clone())));
+        actions.append(&b);
+    }
+    actions
 }
 
 pub fn group_list(group: &Group, selected: Option<&str>, sender: &Sender) -> gtk::ListBox {

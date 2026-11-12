@@ -1,3 +1,4 @@
+mod group;
 mod rows;
 
 use std::collections::HashSet;
@@ -36,6 +37,7 @@ pub enum Msg {
     Remove(String),
     RemoveConfirmed { id: String, force: bool },
     Shell(String),
+    Group(group::Op, String),
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +181,7 @@ impl Component for ContainersView {
                 |()| Cmd::Done("Container removed"),
             ),
             Msg::Shell(id) => self.shell(&id),
+            Msg::Group(op, project) => group::request(self, op, &project, &sender),
         }
     }
 

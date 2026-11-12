@@ -4,12 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use bollard::models::{ContainerCpuStats, ContainerStatsResponse, ContainerSummary, PortSummary};
+use serde::{Deserialize, Serialize};
 
 const PROJECT: &str = "com.docker.compose.project";
 const CONFIG_FILES: &str = "com.docker.compose.project.config_files";
 const WORKING_DIR: &str = "com.docker.compose.project.working_dir";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRecord {
     pub name: String,
     pub config_files: Vec<PathBuf>,
@@ -160,6 +161,28 @@ pub fn merge_projects(live: Vec<ProjectRecord>, remembered: &[ProjectRecord]) ->
         merged.insert(record.name.clone(), Project { record, live: true });
     }
     merged.into_values().collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposeCmd {
+    Up,
+    Down,
+    Pull,
+}
+
+pub fn compose_args(record: &ProjectRecord, cmd: ComposeCmd) -> Vec<String> {
+    let mut args = vec!["compose".to_string(), "-p".into(), record.name.clone()];
+    for file in &record.config_files {
+        args.push("-f".into());
+        args.push(file.display().to_string());
+    }
+    let tail: &[&str] = match cmd {
+        ComposeCmd::Up => &["up", "-d"],
+        ComposeCmd::Down => &["down"],
+        ComposeCmd::Pull => &["pull"],
+    };
+    args.extend(tail.iter().map(|s| s.to_string()));
+    args
 }
 
 fn cpu_times(c: &ContainerCpuStats) -> Option<(u64, u64)> {
@@ -371,6 +394,16 @@ mod tests {
                 live: false
             }]
         );
+    }
+
+    #[test]
+    fn compose_args_pass_project_and_every_file_in_order() {
+        let r = record("icon-it", &["/w/docker-compose.yml", "/w/docker-compose.override.yml"], "/w");
+        let base = ["compose", "-p", "icon-it", "-f", "/w/docker-compose.yml", "-f", "/w/docker-compose.override.yml"];
+        let with = |tail: &[&'static str]| [&base[..], tail].concat();
+        assert_eq!(compose_args(&r, ComposeCmd::Up), with(&["up", "-d"]));
+        assert_eq!(compose_args(&r, ComposeCmd::Down), with(&["down"]));
+        assert_eq!(compose_args(&r, ComposeCmd::Pull), with(&["pull"]));
     }
 
     fn cpu(total: u64, system: u64, online: Option<u32>, percpu: usize) -> ContainerCpuStats {
