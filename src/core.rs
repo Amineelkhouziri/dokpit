@@ -1,9 +1,9 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use bollard::models::{ContainerCpuStats, ContainerStatsResponse, ContainerSummary};
+use bollard::models::{ContainerCpuStats, ContainerStatsResponse, ContainerSummary, PortSummary};
 
 const PROJECT: &str = "com.docker.compose.project";
 const CONFIG_FILES: &str = "com.docker.compose.project.config_files";
@@ -65,6 +65,59 @@ pub fn group_containers(containers: &[ContainerSummary]) -> Vec<Group> {
         });
     }
     groups
+}
+
+pub fn filter_groups(groups: Vec<Group>, query: &str) -> Vec<Group> {
+    let query = query.trim().to_lowercase();
+    let hit = |s: &str| s.to_lowercase().contains(&query);
+    groups
+        .into_iter()
+        .filter_map(|mut g| {
+            if !g.project.as_deref().is_some_and(hit) {
+                g.containers
+                    .retain(|c| hit(&display_name(c)) || c.image.as_deref().is_some_and(hit));
+            }
+            (!g.containers.is_empty()).then_some(g)
+        })
+        .collect()
+}
+
+pub fn display_name(c: &ContainerSummary) -> String {
+    match c.names.as_ref().and_then(|n| n.first()) {
+        Some(name) => name.trim_start_matches('/').to_string(),
+        None => {
+            c.id.as_deref()
+                .unwrap_or_default()
+                .chars()
+                .take(12)
+                .collect()
+        }
+    }
+}
+
+pub fn format_ports(ports: &[PortSummary]) -> String {
+    let unique: BTreeSet<_> = ports
+        .iter()
+        .map(|p| {
+            (
+                p.public_port.is_none(),
+                p.public_port,
+                p.private_port,
+                p.typ,
+            )
+        })
+        .collect();
+    unique
+        .into_iter()
+        .map(|(_, public, private, typ)| {
+            let typ = typ.map(|t| t.to_string()).unwrap_or_default();
+            match public {
+                Some(public) => format!("{public}→{private}/{typ}"),
+                None => format!("{private}/{typ}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn live_projects(containers: &[ContainerSummary]) -> Vec<ProjectRecord> {
@@ -157,7 +210,7 @@ pub fn memory(stats: &ContainerStatsResponse) -> Option<Memory> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bollard::models::{ContainerCpuUsage, ContainerMemoryStats};
+    use bollard::models::{ContainerCpuUsage, ContainerMemoryStats, PortSummaryTypeEnum};
 
     fn container(id: &str, created: i64, labels: &[(&str, &str)]) -> ContainerSummary {
         ContainerSummary {
@@ -419,5 +472,87 @@ mod tests {
     #[test]
     fn memory_is_none_for_stopped_container_sample() {
         assert_eq!(memory(&ContainerStatsResponse::default()), None);
+    }
+
+    #[test]
+    fn display_name_strips_leading_slash_and_falls_back_to_short_id() {
+        let named = ContainerSummary {
+            names: Some(vec!["/web-1".into()]),
+            ..container("0123456789abcdef", 0, &[])
+        };
+        assert_eq!(display_name(&named), "web-1");
+        assert_eq!(
+            display_name(&container("0123456789abcdef", 0, &[])),
+            "0123456789ab"
+        );
+    }
+
+    fn port(
+        ip: Option<&str>,
+        public: Option<u16>,
+        private: u16,
+        typ: PortSummaryTypeEnum,
+    ) -> PortSummary {
+        PortSummary {
+            ip: ip.map(Into::into),
+            private_port: private,
+            public_port: public,
+            typ: Some(typ),
+        }
+    }
+
+    #[test]
+    fn ports_are_deduped_across_ip_families_sorted_and_unpublished_shown_bare() {
+        use PortSummaryTypeEnum::{TCP, UDP};
+        let ports = [
+            port(Some("::"), Some(8080), 80, TCP),
+            port(None, None, 9000, TCP),
+            port(Some("0.0.0.0"), Some(8080), 80, TCP),
+            port(Some("0.0.0.0"), Some(53), 53, UDP),
+        ];
+        assert_eq!(format_ports(&ports), "53→53/udp, 8080→80/tcp, 9000/tcp");
+        assert_eq!(format_ports(&[]), "");
+    }
+
+    fn named(id: &str, image: &str, project: Option<&str>) -> ContainerSummary {
+        let labels: Vec<_> = project
+            .map(|p| ("com.docker.compose.project", p))
+            .into_iter()
+            .collect();
+        ContainerSummary {
+            names: Some(vec![format!("/{id}")]),
+            image: Some(image.into()),
+            ..container(id, 0, &labels)
+        }
+    }
+
+    #[test]
+    fn filter_matches_name_image_or_project_case_insensitively() {
+        let groups = group_containers(&[
+            named("shop-db-1", "postgres:16", Some("shop")),
+            named("shop-web-1", "nginx:1.27", Some("shop")),
+            named("blog-web-1", "Nginx:1.25", Some("blog")),
+            named("redis", "redis:7", None),
+        ]);
+        let ids_of = |gs: Vec<Group>| -> Vec<Vec<String>> {
+            gs.iter()
+                .map(|g| ids(g).into_iter().map(String::from).collect())
+                .collect()
+        };
+
+        assert_eq!(
+            ids_of(filter_groups(groups.clone(), "SHOP")),
+            [vec!["shop-db-1", "shop-web-1"]]
+        );
+        assert_eq!(
+            ids_of(filter_groups(groups.clone(), "nginx")),
+            [vec!["blog-web-1"], vec!["shop-web-1"]]
+        );
+        assert_eq!(
+            ids_of(filter_groups(groups.clone(), " redis ")),
+            [vec!["redis"]]
+        );
+        assert_eq!(filter_groups(groups.clone(), ""), groups);
+        assert!(filter_groups(groups, "nothing").is_empty());
     }
 }
