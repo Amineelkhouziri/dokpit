@@ -1,3 +1,4 @@
+mod details;
 mod rows;
 
 use std::collections::HashSet;
@@ -13,7 +14,6 @@ use relm4::prelude::*;
 use crate::context::{AppCtx, Kind};
 use crate::core;
 use crate::ui::confirm::{Confirm, confirm};
-use crate::ui::detail;
 
 pub struct ContainersView {
     ctx: AppCtx,
@@ -21,6 +21,7 @@ pub struct ContainersView {
     filter: String,
     collapsed: HashSet<Option<String>>,
     selected: Option<String>,
+    details: Controller<details::Details>,
     scroll: gtk::ScrolledWindow,
     groups: gtk::Box,
 }
@@ -51,6 +52,10 @@ impl ContainersView {
     }
 
     fn set_selected(&mut self, id: Option<String>) {
+        if self.selected == id {
+            return;
+        }
+        self.details.emit(details::Msg::Show(id.clone()));
         self.selected = id;
     }
 
@@ -107,8 +112,7 @@ impl Component for ContainersView {
                     set_hscrollbar_policy: gtk::PolicyType::Never,
                 },
             },
-            #[wrap(Some)]
-            set_end_child = &detail::placeholder(),
+            set_end_child: Some(model.details.widget()),
         }
     }
 
@@ -117,12 +121,14 @@ impl Component for ContainersView {
         let groups = gtk::Box::new(gtk::Orientation::Vertical, 6);
         groups.set_margin_all(12);
         let scroll = gtk::ScrolledWindow::builder().child(&groups).build();
+        let details = details::Details::builder().launch(ctx.clone()).detach();
         let model = Self {
             ctx,
             containers: Vec::new(),
             filter: String::new(),
             collapsed: HashSet::new(),
             selected: None,
+            details,
             scroll: scroll.clone(),
             groups,
         };
