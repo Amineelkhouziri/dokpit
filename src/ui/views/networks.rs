@@ -21,6 +21,7 @@ pub struct NetworksView {
     containers: Vec<ContainerSummary>,
     query: String,
     selected: Option<String>,
+    attached: Vec<Member>,
     candidates: Vec<Member>,
     list: gtk::ListBox,
     on_select: glib::SignalHandlerId,
@@ -65,7 +66,7 @@ impl NetworksView {
 
     fn render_list(&self) {
         self.list.block_signal(&self.on_select);
-        while let Some(row) = self.list.first_child() {
+        while let Some(row) = self.list.row_at_index(0) {
             self.list.remove(&row);
         }
         for net in self.nets.iter().filter(|n| model::matches(n, &self.query)) {
@@ -82,22 +83,29 @@ impl NetworksView {
         self.list.unblock_signal(&self.on_select);
     }
 
-    fn render_detail(&mut self, sender: &ComponentSender<Self>) {
-        while let Some(row) = self.members.first_child() {
-            self.members.remove(&row);
-        }
+    fn render_detail(&mut self, sender: &ComponentSender<Self>, force: bool) {
         let net = self.current().map(|n| n.name.clone()).unwrap_or_default();
-        for m in model::attached(&self.containers, &net) {
-            let row = adw::ActionRow::builder().title(m.name.as_str()).subtitle(m.ip.as_str()).build();
-            let button = gtk::Button::builder().label("Disconnect").valign(gtk::Align::Center).build();
-            let sender = sender.clone();
-            button.connect_clicked(move |_| sender.input(Msg::Disconnect(m.id.clone())));
-            row.add_suffix(&button);
-            self.members.append(&row);
+        let attached = model::attached(&self.containers, &net);
+        if force || attached != self.attached {
+            while let Some(row) = self.members.row_at_index(0) {
+                self.members.remove(&row);
+            }
+            for m in &attached {
+                let row = adw::ActionRow::builder().title(m.name.as_str()).subtitle(m.ip.as_str()).build();
+                let button = gtk::Button::builder().label("Disconnect").valign(gtk::Align::Center).build();
+                let (sender, id) = (sender.clone(), m.id.clone());
+                button.connect_clicked(move |_| sender.input(Msg::Disconnect(id.clone())));
+                row.add_suffix(&button);
+                self.members.append(&row);
+            }
+            self.attached = attached;
         }
-        self.candidates = model::connectable(&self.containers, &net);
-        let names: Vec<&str> = self.candidates.iter().map(|m| m.name.as_str()).collect();
-        self.picker.set_model(Some(&gtk::StringList::new(&names)));
+        let candidates = model::connectable(&self.containers, &net);
+        if force || candidates != self.candidates {
+            let names: Vec<&str> = candidates.iter().map(|m| m.name.as_str()).collect();
+            self.picker.set_model(Some(&gtk::StringList::new(&names)));
+            self.candidates = candidates;
+        }
     }
 }
 
@@ -215,6 +223,7 @@ impl Component for NetworksView {
             containers: Vec::new(),
             query: String::new(),
             selected: None,
+            attached: Vec::new(),
             candidates: Vec::new(),
             list,
             on_select,
@@ -236,7 +245,7 @@ impl Component for NetworksView {
             }
             Msg::Select(name) => {
                 self.selected = name;
-                self.render_detail(&sender);
+                self.render_detail(&sender, true);
             }
             Msg::Create => create::ask(move |name, driver| sender.input(Msg::DoCreate(name, driver))),
             Msg::DoCreate(name, driver) => {
@@ -305,13 +314,16 @@ impl Component for NetworksView {
                 |(nets, containers)| Cmd::Loaded(nets, containers),
             ),
             Cmd::Loaded(nets, containers) => {
-                self.nets = model::rows(nets);
+                let rows = model::rows(nets);
                 self.containers = containers;
-                if self.current().is_none() {
-                    self.selected = None;
+                if rows != self.nets {
+                    self.nets = rows;
+                    if self.current().is_none() {
+                        self.selected = None;
+                    }
+                    self.render_list();
                 }
-                self.render_list();
-                self.render_detail(&sender);
+                self.render_detail(&sender, false);
             }
             Cmd::Done(msg) => {
                 self.ctx.toast(msg);
