@@ -165,7 +165,7 @@ impl Component for ImagesView {
                 self.show_detail();
             }
             Msg::Remove => {
-                let Some(row) = self.shown.iter().find(|r| Some(&r.target) == self.selected.as_ref()) else {
+                let Some(row) = self.rows.iter().find(|r| Some(&r.target) == self.selected.as_ref()) else {
                     return;
                 };
                 confirm(
