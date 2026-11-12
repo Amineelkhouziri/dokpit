@@ -181,6 +181,11 @@ impl Component for ProjectsView {
                 let record = p.record;
                 let mut items = vec![format!("Project: {}", record.name)];
                 items.extend(record.config_files.iter().map(|f| format!("File: {}", f.display())));
+                if cmd == ComposeCmd::Down
+                    && let Some(g) = core::group_containers(&self.containers).into_iter().find(|g| g.project.as_ref() == Some(&name))
+                {
+                    items.extend(g.containers.iter().map(|c| format!("Container: {}", core::display_name(c))));
+                }
                 let req = Confirm {
                     heading: format!("Run docker compose {} on {}?", label(cmd), record.name),
                     items,
