@@ -9,7 +9,9 @@ use bollard::models::ContainerSummary;
 use bollard::query_parameters::{
     ListContainersOptions, RemoveContainerOptions, RestartContainerOptions, StartContainerOptions, StopContainerOptions,
 };
-use relm4::gtk::prelude::*;
+use futures_util::future::try_join_all;
+use relm4::RelmRemoveAllExt;
+use relm4::gtk::{glib, prelude::*};
 use relm4::prelude::*;
 
 use crate::context::{AppCtx, Kind};
@@ -38,7 +40,48 @@ pub enum Msg {
     Remove(String),
     RemoveConfirmed { id: String, force: bool },
     Shell(String),
-    Group(group::Op, String),
+    Group(Op, String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Op {
+    Start,
+    Stop,
+    Restart,
+    Remove,
+}
+
+pub fn run(
+    ctx: &AppCtx,
+    sender: &ComponentSender<ContainersView>,
+    op: Op,
+    ids: Vec<String>,
+    force: bool,
+    what: &'static str,
+    done: &'static str,
+) {
+    ctx.run(
+        sender,
+        what,
+        move |d| async move {
+            try_join_all(ids.iter().map(|id| {
+                let d = d.clone();
+                async move {
+                    match op {
+                        Op::Start => d.start_container(id, None::<StartContainerOptions>).await,
+                        Op::Stop => d.stop_container(id, None::<StopContainerOptions>).await,
+                        Op::Restart => d.restart_container(id, None::<RestartContainerOptions>).await,
+                        Op::Remove => {
+                            let opts = RemoveContainerOptions { force, ..Default::default() };
+                            d.remove_container(id, Some(opts)).await
+                        }
+                    }
+                }
+            }))
+            .await
+        },
+        move |_| Cmd::Done(done),
+    );
 }
 
 #[derive(Clone, Debug)]
@@ -64,13 +107,11 @@ impl ContainersView {
     fn render(&self, sender: &ComponentSender<Self>) {
         let adj = self.scroll.vadjustment();
         let pos = adj.value();
-        while let Some(child) = self.groups.first_child() {
-            self.groups.remove(&child);
-        }
+        self.groups.remove_all();
         let filtering = !self.filter.trim().is_empty();
         for group in core::filter_groups(core::group_containers(&self.containers), &self.filter) {
             let open = filtering || !self.collapsed.contains(&group.project);
-            self.groups.append(&rows::group_header(&group, open, sender));
+            self.groups.append(&rows::group_header(&group, open, !filtering, sender));
             if open {
                 self.groups.append(&rows::group_list(&group, self.selected(), sender));
             }
@@ -79,7 +120,12 @@ impl ContainersView {
     }
 
     fn shell(&self, id: &str) {
-        match Command::new("tilix").args(["-e", &format!("docker exec -it {id} sh")]).spawn() {
+        let Some(argv) = core::shell_argv(self.ctx.host(), id) else {
+            self.ctx.error(format!("Open shell: invalid container id {id}"));
+            return;
+        };
+        let command = argv.iter().map(|a| glib::shell_quote(a).to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
+        match Command::new("tilix").args(["-e", &command]).spawn() {
             Ok(mut child) => {
                 std::thread::spawn(move || child.wait());
             }
@@ -152,40 +198,25 @@ impl Component for ContainersView {
                 self.render(&sender);
             }
             Msg::Select(id) => self.set_selected(Some(id)),
-            Msg::Start(id) => self.ctx.run(
-                &sender,
-                "Start container",
-                |d| async move { d.start_container(&id, None::<StartContainerOptions>).await },
-                |()| Cmd::Done("Container started"),
-            ),
-            Msg::Stop(id) => self.ctx.run(
-                &sender,
-                "Stop container",
-                |d| async move { d.stop_container(&id, None::<StopContainerOptions>).await },
-                |()| Cmd::Done("Container stopped"),
-            ),
-            Msg::Restart(id) => self.ctx.run(
-                &sender,
-                "Restart container",
-                |d| async move { d.restart_container(&id, None::<RestartContainerOptions>).await },
-                |()| Cmd::Done("Container restarted"),
-            ),
+            Msg::Start(id) => run(&self.ctx, &sender, Op::Start, vec![id], false, "Start container", "Container started"),
+            Msg::Stop(id) => run(&self.ctx, &sender, Op::Stop, vec![id], false, "Stop container", "Container stopped"),
+            Msg::Restart(id) => {
+                run(&self.ctx, &sender, Op::Restart, vec![id], false, "Restart container", "Container restarted")
+            }
             Msg::Remove(id) => {
                 let Some(c) = self.containers.iter().find(|c| c.id.as_deref() == Some(id.as_str())) else { return };
                 let req = Confirm {
                     heading: "Remove container?".into(),
                     items: vec![core::display_name(c)],
                     action: "Remove".into(),
-                    option: rows::is_up(c).then(|| "Force (container is running)".into()),
+                    option: core::is_up(c).then(|| "Force (container is running)".into()),
+                    destructive: true,
                 };
                 confirm(req, move |force| sender.input(Msg::RemoveConfirmed { id, force }));
             }
-            Msg::RemoveConfirmed { id, force } => self.ctx.run(
-                &sender,
-                "Remove container",
-                |d| async move { d.remove_container(&id, Some(RemoveContainerOptions { force, ..Default::default() })).await },
-                |()| Cmd::Done("Container removed"),
-            ),
+            Msg::RemoveConfirmed { id, force } => {
+                run(&self.ctx, &sender, Op::Remove, vec![id], force, "Remove container", "Container removed")
+            }
             Msg::Shell(id) => self.shell(&id),
             Msg::Group(op, project) => group::request(self, op, &project, &sender),
         }

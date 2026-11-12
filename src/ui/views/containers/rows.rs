@@ -2,22 +2,17 @@ use bollard::models::{ContainerSummary, ContainerSummaryStateEnum as State};
 use relm4::adw::{self, prelude::*};
 use relm4::{ComponentSender, gtk, gtk::glib};
 
-use super::group::Op;
-use super::{ContainersView, Msg};
+use super::{ContainersView, Msg, Op};
 use crate::core::{self, Group};
 
 type Sender = ComponentSender<ContainersView>;
 
-pub fn is_up(c: &ContainerSummary) -> bool {
-    matches!(c.state, Some(State::RUNNING | State::PAUSED | State::RESTARTING))
-}
-
-pub fn group_header(group: &Group, open: bool, sender: &Sender) -> gtk::Box {
+pub fn group_header(group: &Group, open: bool, collapsible: bool, sender: &Sender) -> gtk::Box {
     let label = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     label.append(&gtk::Image::from_icon_name(if open { "pan-down-symbolic" } else { "pan-end-symbolic" }));
     label.append(&gtk::Label::builder().label(group.project.as_deref().unwrap_or("Standalone")).css_classes(["heading"]).build());
     label.append(&gtk::Label::builder().label(group.containers.len().to_string()).css_classes(["dim-label"]).build());
-    let toggle = gtk::Button::builder().child(&label).css_classes(["flat"]).build();
+    let toggle = gtk::Button::builder().child(&label).css_classes(["flat"]).sensitive(collapsible).build();
     let (project, s) = (group.project.clone(), sender.clone());
     toggle.connect_clicked(move |_| s.input(Msg::Toggle(project.clone())));
 
@@ -106,7 +101,7 @@ fn container_row(c: &ContainerSummary, id: &str, sender: &Sender) -> adw::Action
         row.add_suffix(&b);
         b
     };
-    if is_up(c) {
+    if core::is_up(c) {
         button("media-playback-stop-symbolic", "Stop", Msg::Stop);
     } else {
         button("media-playback-start-symbolic", "Start", Msg::Start);

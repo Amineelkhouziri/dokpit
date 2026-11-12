@@ -1,5 +1,7 @@
 use bollard::models::{ContainerSummary, EndpointSettings, Network};
 
+use super::display_name;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetRow {
     pub id: String,
@@ -29,9 +31,10 @@ pub fn rows(nets: Vec<Network>) -> Vec<NetRow> {
     rows
 }
 
-pub fn matches(row: &NetRow, query: &str) -> bool {
-    let q = query.to_lowercase();
-    [&row.name, &row.driver, &row.scope].iter().any(|f| f.to_lowercase().contains(&q))
+impl NetRow {
+    pub fn matches(&self, query: &str) -> bool {
+        super::matches(query, &[&self.name, &self.driver, &self.scope])
+    }
 }
 
 fn endpoint<'a>(c: &'a ContainerSummary, network: &str) -> Option<&'a EndpointSettings> {
@@ -39,14 +42,7 @@ fn endpoint<'a>(c: &'a ContainerSummary, network: &str) -> Option<&'a EndpointSe
 }
 
 fn member(c: &ContainerSummary, ip: Option<&String>) -> Member {
-    let id = c.id.clone().unwrap_or_default();
-    let name = c
-        .names
-        .as_ref()
-        .and_then(|n| n.first())
-        .map(|n| n.trim_start_matches('/').to_string())
-        .unwrap_or_else(|| id.chars().take(12).collect());
-    Member { id, name, ip: ip.cloned().unwrap_or_default() }
+    Member { id: c.id.clone().unwrap_or_default(), name: display_name(c), ip: ip.cloned().unwrap_or_default() }
 }
 
 fn sorted(mut members: Vec<Member>) -> Vec<Member> {
@@ -122,9 +118,9 @@ mod tests {
     #[test]
     fn filter_matches_name_driver_or_scope_ignoring_case() {
         let rows = rows(vec![net("ctoc_default", "bridge"), net("host", "host")]);
-        let hits = |q: &str| rows.iter().filter(|r| matches(r, q)).map(|r| r.name.clone()).collect::<Vec<_>>();
+        let hits = |q: &str| rows.iter().filter(|r| r.matches(q)).map(|r| r.name.clone()).collect::<Vec<_>>();
         assert_eq!(hits(""), ["ctoc_default", "host"]);
-        assert_eq!(hits("CTOC"), ["ctoc_default"]);
+        assert_eq!(hits(" CTOC "), ["ctoc_default"]);
         assert_eq!(hits("bri"), ["ctoc_default"]);
         assert_eq!(hits("LOCAL"), ["ctoc_default", "host"]);
         assert!(hits("zzz").is_empty());

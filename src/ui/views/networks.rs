@@ -1,19 +1,20 @@
 mod create;
-mod model;
 
 use bollard::models::{
     ContainerSummary, Network, NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest,
 };
 use bollard::query_parameters::{ListContainersOptionsBuilder, ListNetworksOptions};
 use futures_util::future::try_join;
+use relm4::RelmRemoveAllExt;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::glib;
 use relm4::prelude::*;
 
 use crate::context::{AppCtx, Kind};
+use crate::core;
 use crate::ui::confirm::{Confirm, confirm};
 use crate::ui::detail;
-use model::{Member, NetRow};
+use crate::core::networks::{self as model, Member, NetRow};
 
 pub struct NetworksView {
     ctx: AppCtx,
@@ -60,19 +61,17 @@ impl NetworksView {
 
     fn summary(&self) -> String {
         self.current()
-            .map(|n| format!("{} · {} · {}", n.driver, n.scope, n.id.chars().take(12).collect::<String>()))
+            .map(|n| format!("{} · {} · {}", n.driver, n.scope, core::short_id(&n.id)))
             .unwrap_or_default()
     }
 
     fn render_list(&self) {
         self.list.block_signal(&self.on_select);
-        while let Some(row) = self.list.row_at_index(0) {
-            self.list.remove(&row);
-        }
-        for net in self.nets.iter().filter(|n| model::matches(n, &self.query)) {
+        self.list.remove_all();
+        for net in self.nets.iter().filter(|n| n.matches(&self.query)) {
             let row = adw::ActionRow::builder()
-                .title(net.name.as_str())
-                .subtitle(format!("{} · {}", net.driver, net.scope))
+                .title(glib::markup_escape_text(&net.name).as_str())
+                .subtitle(glib::markup_escape_text(&format!("{} · {}", net.driver, net.scope)).as_str())
                 .build();
             row.set_widget_name(&net.name);
             self.list.append(&row);
@@ -87,11 +86,12 @@ impl NetworksView {
         let net = self.current().map(|n| n.name.clone()).unwrap_or_default();
         let attached = model::attached(&self.containers, &net);
         if force || attached != self.attached {
-            while let Some(row) = self.members.row_at_index(0) {
-                self.members.remove(&row);
-            }
+            self.members.remove_all();
             for m in &attached {
-                let row = adw::ActionRow::builder().title(m.name.as_str()).subtitle(m.ip.as_str()).build();
+                let row = adw::ActionRow::builder()
+                    .title(glib::markup_escape_text(&m.name).as_str())
+                    .subtitle(glib::markup_escape_text(&m.ip).as_str())
+                    .build();
                 let button = gtk::Button::builder().label("Disconnect").valign(gtk::Align::Center).build();
                 let (sender, id) = (sender.clone(), m.id.clone());
                 button.connect_clicked(move |_| sender.input(Msg::Disconnect(id.clone())));
@@ -262,7 +262,13 @@ impl Component for NetworksView {
                 let mut items = vec![format!("Network: {net}")];
                 items.extend(model::attached(&self.containers, &net).into_iter().map(|m| format!("Attached: {}", m.name)));
                 confirm(
-                    Confirm { heading: "Remove network?".into(), items, action: "Remove".into(), option: None },
+                    Confirm {
+                        heading: "Remove network?".into(),
+                        items,
+                        action: "Remove".into(),
+                        option: None,
+                        destructive: true,
+                    },
                     move |_| sender.input(Msg::DoRemove(net)),
                 );
             }

@@ -36,6 +36,7 @@ pub enum Notice {
 #[derive(Clone)]
 pub struct AppCtx {
     docker: Arc<OnceLock<Docker>>,
+    host: Arc<str>,
     events: broadcast::Sender<DockerEvent>,
     notices: Sender<Notice>,
 }
@@ -43,11 +44,16 @@ pub struct AppCtx {
 impl AppCtx {
     pub fn new(notices: Sender<Notice>) -> Self {
         let (events, _) = broadcast::channel(256);
-        Self { docker: Arc::default(), events, notices }
+        let host = crate::core::docker_host(std::env::var("DOCKER_HOST").ok().as_deref());
+        Self { docker: Arc::default(), host: host.into(), events, notices }
     }
 
     pub fn docker(&self) -> Option<&Docker> {
         self.docker.get()
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     pub fn set_docker(&self, docker: Docker) -> Docker {

@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 
 use bollard::models::{ContainerInspectResponse, ContainerStatsResponse, PortMap};
 
+use super::{Section, matches};
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Delta {
     pub removed: usize,
@@ -24,26 +26,19 @@ impl LogBuffer {
         let Some(end) = self.partial.rfind('\n') else { return Delta::default() };
         let rest = self.partial.split_off(end + 1);
         let complete = std::mem::replace(&mut self.partial, rest);
-        let query = query.trim().to_lowercase();
         let new: Vec<&str> = complete.lines().collect();
         let overflow = (self.lines.len() + new.len()).saturating_sub(self.cap);
         let evict = overflow.min(self.lines.len());
         let new = &new[overflow - evict..];
-        let removed = self.lines.drain(..evict).filter(|l| matches(l, &query)).count();
-        let added = new.iter().filter(|l| matches(l, &query)).map(|l| format!("{l}\n")).collect();
+        let removed = self.lines.drain(..evict).filter(|l| matches(query, &[l.as_str()])).count();
+        let added = new.iter().filter(|l| matches(query, &[l])).map(|l| format!("{l}\n")).collect();
         self.lines.extend(new.iter().map(|l| l.to_string()));
         Delta { removed, added }
     }
 
     pub fn text(&self, query: &str) -> String {
-        let query = query.trim().to_lowercase();
-        self.lines.iter().filter(|l| matches(l, &query)).map(|l| format!("{l}\n")).collect()
+        self.lines.iter().filter(|l| matches(query, &[l.as_str()])).map(|l| format!("{l}\n")).collect()
     }
-}
-
-pub struct Section {
-    pub title: &'static str,
-    pub rows: Vec<(String, String)>,
 }
 
 pub fn info_sections(c: &ContainerInspectResponse) -> Vec<Section> {
@@ -129,32 +124,6 @@ pub fn net_totals(stats: &ContainerStatsResponse) -> Net {
     })
 }
 
-pub fn format_bytes(bytes: u64) -> String {
-    format_size(bytes as f64)
-}
-
-pub fn format_rate(bytes_per_sec: f64) -> String {
-    format!("{}/s", format_size(bytes_per_sec.max(0.0)))
-}
-
-fn format_size(bytes: f64) -> String {
-    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
-    if bytes < 1024.0 {
-        return format!("{} B", bytes.round());
-    }
-    let mut value = bytes / 1024.0;
-    let mut unit = 0;
-    while (value * 10.0).round() >= 10240.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    format!("{value:.1} {}", UNITS[unit])
-}
-
-fn matches(line: &str, query: &str) -> bool {
-    query.is_empty() || line.to_lowercase().contains(query)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,27 +174,6 @@ mod tests {
         let delta = logs.push("c\nd\ne\nf\n", "");
         assert_eq!(delta, Delta { removed: 2, added: "d\ne\nf\n".into() });
         assert_eq!(logs.text(""), "d\ne\nf\n");
-    }
-
-    #[test]
-    fn bytes_use_binary_units_with_one_decimal() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1023), "1023 B");
-        assert_eq!(format_bytes(1536), "1.5 KiB");
-        assert_eq!(format_bytes(12_897_484), "12.3 MiB");
-        assert_eq!(format_bytes(8_160_437_862), "7.6 GiB");
-    }
-
-    #[test]
-    fn byte_rounding_rolls_over_to_next_unit() {
-        assert_eq!(format_bytes(1_048_575), "1.0 MiB");
-    }
-
-    #[test]
-    fn rates_are_per_second_and_never_negative() {
-        assert_eq!(format_rate(0.0), "0 B/s");
-        assert_eq!(format_rate(1536.0), "1.5 KiB/s");
-        assert_eq!(format_rate(-5.0), "0 B/s");
     }
 
     fn net_sample(ifaces: &[(&str, u64, u64)]) -> ContainerStatsResponse {

@@ -7,9 +7,9 @@ pub struct Confirm {
     pub items: Vec<String>,
     pub action: String,
     pub option: Option<String>,
+    pub destructive: bool,
 }
 
-#[allow(dead_code)]
 pub fn confirm(req: Confirm, on_accept: impl FnOnce(bool) + 'static) {
     let dialog = gtk::MessageDialog::builder()
         .modal(true)
@@ -21,9 +21,8 @@ pub fn confirm(req: Confirm, on_accept: impl FnOnce(bool) + 'static) {
         dialog.set_transient_for(Some(&win));
     }
     dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-    dialog
-        .add_button(&req.action, gtk::ResponseType::Accept)
-        .add_css_class("destructive-action");
+    let accept = dialog.add_button(&req.action, gtk::ResponseType::Accept);
+    accept.add_css_class(if req.destructive { "destructive-action" } else { "suggested-action" });
     dialog.set_default_response(gtk::ResponseType::Cancel);
 
     let area = dialog.message_area().downcast::<gtk::Box>().expect("message area is a GtkBox");
@@ -31,6 +30,9 @@ pub fn confirm(req: Confirm, on_accept: impl FnOnce(bool) + 'static) {
         .label(req.items.join("\n"))
         .xalign(0.0)
         .selectable(true)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .max_width_chars(60)
         .build();
     area.append(
         &gtk::ScrolledWindow::builder()

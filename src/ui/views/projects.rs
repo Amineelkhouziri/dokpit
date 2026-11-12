@@ -1,31 +1,36 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use bollard::models::{ContainerSummary, ContainerSummaryStateEnum as State};
+use bollard::models::ContainerSummary;
 use bollard::query_parameters::ListContainersOptions;
+use relm4::RelmRemoveAllExt;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::glib;
 use relm4::prelude::*;
-use relm4::RelmRemoveAllExt;
 
 use crate::context::{AppCtx, Kind};
-use crate::core::{self, ComposeCmd, ProjectRecord};
+use crate::core::{self, ComposeCmd, Project, ProjectRecord};
 use crate::store;
 use crate::ui::confirm::{Confirm, confirm};
+use crate::ui::detail;
 
 pub struct ProjectsView {
     ctx: AppCtx,
     store_path: Option<PathBuf>,
     remembered: Vec<ProjectRecord>,
     containers: Vec<ContainerSummary>,
+    projects: Vec<Project>,
     filter: String,
+    selected: Option<String>,
     list: gtk::ListBox,
+    on_select: glib::SignalHandlerId,
+    pane: detail::Pane,
 }
 
 #[derive(Clone, Debug)]
 pub enum Msg {
     Filter(String),
+    Select(Option<String>),
     Compose(ComposeCmd, String),
     RunCompose(ComposeCmd, ProjectRecord),
     Forget(String),
@@ -38,14 +43,6 @@ pub enum Cmd {
     Composed(Result<String, String>),
 }
 
-fn label(cmd: ComposeCmd) -> &'static str {
-    match cmd {
-        ComposeCmd::Up => "up",
-        ComposeCmd::Down => "down",
-        ComposeCmd::Pull => "pull",
-    }
-}
-
 impl ProjectsView {
     fn save(&self) {
         if let Some(path) = &self.store_path
@@ -55,26 +52,41 @@ impl ProjectsView {
         }
     }
 
+    fn reload(&mut self) {
+        self.projects = core::merge_projects(core::live_projects(&self.containers), &self.remembered);
+        let records: Vec<ProjectRecord> = self.projects.iter().map(|p| p.record.clone()).collect();
+        if records != self.remembered {
+            self.remembered = records;
+            self.save();
+        }
+        if !self.projects.iter().any(|p| Some(&p.record.name) == self.selected.as_ref()) {
+            self.selected = None;
+        }
+    }
+
     fn render(&self, sender: &ComponentSender<Self>) {
+        self.list.block_signal(&self.on_select);
         self.list.remove_all();
-        let mut counts: HashMap<String, (usize, usize)> = HashMap::new();
-        for g in core::group_containers(&self.containers) {
-            if let Some(name) = g.project {
-                let running = g.containers.iter().filter(|c| c.state == Some(State::RUNNING)).count();
-                counts.insert(name, (running, g.containers.len()));
+        for p in self.projects.iter().filter(|p| core::matches(&self.filter, &[&p.record.name])) {
+            let row = row(p, core::up_count(&self.containers, &p.record.name), sender);
+            self.list.append(&row);
+            if self.selected.as_ref() == Some(&p.record.name) {
+                self.list.select_row(Some(&row));
             }
         }
-        let query = self.filter.trim().to_lowercase();
-        for p in core::merge_projects(core::live_projects(&self.containers), &self.remembered) {
-            if !p.record.name.to_lowercase().contains(&query) {
-                continue;
-            }
-            self.list.append(&row(&p, counts.get(&p.record.name).copied(), sender));
+        self.list.unblock_signal(&self.on_select);
+        self.show_detail();
+    }
+
+    fn show_detail(&self) {
+        match self.projects.iter().find(|p| Some(&p.record.name) == self.selected.as_ref()) {
+            Some(p) => self.pane.show(&p.record.name, &core::project_sections(p, &self.containers)),
+            None => self.pane.clear(),
         }
     }
 }
 
-fn row(p: &core::Project, counts: Option<(usize, usize)>, sender: &ComponentSender<ProjectsView>) -> adw::ActionRow {
+fn row(p: &Project, counts: Option<(usize, usize)>, sender: &ComponentSender<ProjectsView>) -> adw::ActionRow {
     let r = &p.record;
     let paths = if r.config_files.is_empty() {
         r.working_dir.display().to_string()
@@ -86,14 +98,19 @@ fn row(p: &core::Project, counts: Option<(usize, usize)>, sender: &ComponentSend
         .subtitle(glib::markup_escape_text(&paths).as_str())
         .subtitle_lines(0)
         .build();
-    let (state, style) = match counts {
-        Some((running, total)) if p.live => {
-            let style = if running == total { "success" } else if running > 0 { "warning" } else { "dim-label" };
-            (format!("{running}/{total} running"), style)
-        }
-        _ => ("stopped".to_string(), "dim-label"),
+    row.set_widget_name(&r.name);
+    let style = match counts {
+        Some((up, total)) if up == total => "success",
+        Some((up, _)) if up > 0 => "warning",
+        _ => "dim-label",
     };
-    row.add_suffix(&gtk::Label::builder().label(state).css_classes([style]).valign(gtk::Align::Center).build());
+    row.add_suffix(
+        &gtk::Label::builder()
+            .label(core::project_state(counts))
+            .css_classes([style])
+            .valign(gtk::Align::Center)
+            .build(),
+    );
 
     let has_files = !r.config_files.is_empty();
     let button = |icon: &str, tooltip: &str, sensitive: bool, msg: Msg| {
@@ -125,6 +142,9 @@ impl Component for ProjectsView {
 
     view! {
         gtk::Paned {
+            set_position: 560,
+            set_shrink_start_child: false,
+            set_shrink_end_child: false,
             #[wrap(Some)]
             set_start_child = &gtk::Box {
                 set_orientation: gtk::Orientation::Vertical,
@@ -140,11 +160,11 @@ impl Component for ProjectsView {
                     list -> gtk::ListBox {
                         set_margin_all: 12,
                         set_valign: gtk::Align::Start,
-                        set_selection_mode: gtk::SelectionMode::None,
                         add_css_class: "boxed-list",
                     },
                 },
             },
+            set_end_child: Some(model.pane.widget()),
         }
     }
 
@@ -158,7 +178,24 @@ impl Component for ProjectsView {
                 (None, Vec::new())
             }
         };
-        let model = Self { ctx, store_path, remembered, containers: Vec::new(), filter: String::new(), list: gtk::ListBox::new() };
+        let list = gtk::ListBox::new();
+        let on_select = list.connect_row_selected({
+            let sender = sender.clone();
+            move |_, row| sender.input(Msg::Select(row.map(|r| r.widget_name().into())))
+        });
+        let mut model = Self {
+            ctx,
+            store_path,
+            remembered,
+            containers: Vec::new(),
+            projects: Vec::new(),
+            filter: String::new(),
+            selected: None,
+            list,
+            on_select,
+            pane: detail::Pane::default(),
+        };
+        model.reload();
         model.render(&sender);
         let list = &model.list;
         let widgets = view_output!();
@@ -171,32 +208,34 @@ impl Component for ProjectsView {
                 self.filter = f;
                 self.render(&sender);
             }
+            Msg::Select(name) => {
+                self.selected = name;
+                self.show_detail();
+            }
             Msg::Compose(cmd, name) => {
-                let Some(p) = core::merge_projects(core::live_projects(&self.containers), &self.remembered)
-                    .into_iter()
-                    .find(|p| p.record.name == name)
-                else {
+                let Some(record) = self.projects.iter().find(|p| p.record.name == name).map(|p| p.record.clone()) else {
                     return;
                 };
-                let record = p.record;
                 let mut items = vec![format!("Project: {}", record.name)];
                 items.extend(record.config_files.iter().map(|f| format!("File: {}", f.display())));
-                if cmd == ComposeCmd::Down
-                    && let Some(g) = core::group_containers(&self.containers).into_iter().find(|g| g.project.as_ref() == Some(&name))
-                {
-                    items.extend(g.containers.iter().map(|c| format!("Container: {}", core::display_name(c))));
+                if cmd == ComposeCmd::Down {
+                    items.extend(
+                        core::project_members(&self.containers, &name)
+                            .map(|c| format!("Container: {}", core::display_name(c))),
+                    );
                 }
                 let req = Confirm {
-                    heading: format!("Run docker compose {} on {}?", label(cmd), record.name),
+                    heading: format!("Run docker compose {} on {}?", cmd.name(), record.name),
                     items,
-                    action: format!("Compose {}", label(cmd)),
+                    action: format!("Compose {}", cmd.name()),
                     option: None,
+                    destructive: cmd == ComposeCmd::Down,
                 };
                 confirm(req, move |_| sender.input(Msg::RunCompose(cmd, record)));
             }
             Msg::RunCompose(cmd, record) => {
-                let args = core::compose_args(&record, cmd);
-                let what = format!("Compose {} {}", label(cmd), record.name);
+                let args = core::compose_args(self.ctx.host(), &record, cmd);
+                let what = format!("Compose {} {}", cmd.name(), record.name);
                 self.ctx.toast(format!("{what}: running"));
                 sender.oneshot_command(async move {
                     let out = tokio::process::Command::new("docker").args(&args).stdin(Stdio::null()).output().await;
@@ -212,8 +251,9 @@ impl Component for ProjectsView {
                 });
             }
             Msg::Forget(name) => {
-                self.remembered.retain(|r| r.name != name);
+                core::forget(&mut self.remembered, &name);
                 self.save();
+                self.reload();
                 self.render(&sender);
             }
         }
@@ -230,15 +270,7 @@ impl Component for ProjectsView {
             Cmd::Loaded(containers) if containers == self.containers => {}
             Cmd::Loaded(containers) => {
                 self.containers = containers;
-                let records: Vec<ProjectRecord> =
-                    core::merge_projects(core::live_projects(&self.containers), &self.remembered)
-                        .into_iter()
-                        .map(|p| p.record)
-                        .collect();
-                if records != self.remembered {
-                    self.remembered = records;
-                    self.save();
-                }
+                self.reload();
                 self.render(&sender);
             }
             Cmd::Composed(Ok(msg)) => self.ctx.toast(msg),

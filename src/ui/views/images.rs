@@ -1,23 +1,24 @@
-mod model;
-
 use std::collections::HashMap;
 
-use bollard::models::{ImagePruneResponse, ImageSummary};
+use bollard::models::{ContainerSummary, ImagePruneResponse, ImageSummary};
 use bollard::query_parameters::{
     CreateImageOptions, ListContainersOptions, ListImagesOptions, PruneImagesOptionsBuilder, RemoveImageOptions,
 };
 use futures_util::StreamExt;
-use relm4::gtk::prelude::*;
-use relm4::prelude::*;
+use futures_util::future::try_join;
 use relm4::RelmRemoveAllExt;
+use relm4::gtk::{glib, prelude::*};
+use relm4::prelude::*;
 
 use crate::context::{AppCtx, Kind};
+use crate::core::{self, images::{self as model, ImageRow, PullProgress}};
 use crate::ui::confirm::{Confirm, confirm};
 use crate::ui::detail;
-use model::{ImageRow, PullProgress};
 
 pub struct ImagesView {
     ctx: AppCtx,
+    images: Vec<ImageSummary>,
+    containers: Vec<ContainerSummary>,
     rows: Vec<ImageRow>,
     shown: Vec<ImageRow>,
     filter: String,
@@ -25,6 +26,8 @@ pub struct ImagesView {
     pulling: bool,
     progress: String,
     list: gtk::ListBox,
+    on_select: glib::SignalHandlerId,
+    pane: detail::Pane,
     pull_entry: gtk::Entry,
 }
 
@@ -42,7 +45,7 @@ pub enum Msg {
 #[derive(Clone, Debug)]
 pub enum Cmd {
     Refresh,
-    Loaded(Vec<ImageSummary>),
+    Loaded(Vec<ImageSummary>, Vec<ContainerSummary>),
     PruneList(Vec<String>),
     Pruned(ImagePruneResponse),
     Removed,
@@ -91,11 +94,7 @@ impl Component for ImagesView {
                     set_vexpand: true,
                     set_hscrollbar_policy: gtk::PolicyType::Never,
                     #[local_ref]
-                    list -> gtk::ListBox {
-                        connect_row_selected[sender] => move |_, row| {
-                            sender.input(Msg::Select(row.map(|r| r.index() as usize)));
-                        },
-                    },
+                    list -> gtk::ListBox {},
                 },
                 gtk::Label {
                     set_xalign: 0.0,
@@ -124,22 +123,30 @@ impl Component for ImagesView {
                     },
                 },
             },
-            #[wrap(Some)]
-            set_end_child = &detail::placeholder(),
+            set_end_child: Some(model.pane.widget()),
         }
     }
 
     fn init(ctx: AppCtx, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
-        ctx.on_change(&sender, &[Kind::IMAGE], Cmd::Refresh);
+        ctx.on_change(&sender, &[Kind::IMAGE, Kind::CONTAINER], Cmd::Refresh);
+        let list = gtk::ListBox::new();
+        let on_select = list.connect_row_selected({
+            let sender = sender.clone();
+            move |_, row| sender.input(Msg::Select(row.map(|r| r.index() as usize)))
+        });
         let model = Self {
             ctx,
+            images: Vec::new(),
+            containers: Vec::new(),
             rows: Vec::new(),
             shown: Vec::new(),
             filter: String::new(),
             selected: None,
             pulling: false,
             progress: String::new(),
-            list: gtk::ListBox::new(),
+            list,
+            on_select,
+            pane: detail::Pane::default(),
             pull_entry: gtk::Entry::new(),
         };
         let list = &model.list;
@@ -154,7 +161,10 @@ impl Component for ImagesView {
                 self.filter = text;
                 self.render();
             }
-            Msg::Select(i) => self.selected = i.and_then(|i| self.shown.get(i)).map(|r| r.target.clone()),
+            Msg::Select(i) => {
+                self.selected = i.and_then(|i| self.shown.get(i)).map(|r| r.target.clone());
+                self.show_detail();
+            }
             Msg::Remove => {
                 let Some(row) = self.shown.iter().find(|r| Some(&r.target) == self.selected.as_ref()) else {
                     return;
@@ -165,6 +175,7 @@ impl Component for ImagesView {
                         items: vec![format!("{}:{} ({}, {})", row.repo, row.tag, row.id, row.size)],
                         action: "Remove".into(),
                         option: Some("Force".into()),
+                        destructive: true,
                     },
                     {
                         let target = row.target.clone();
@@ -211,12 +222,24 @@ impl Component for ImagesView {
             Cmd::Refresh => self.ctx.run(
                 &sender,
                 "List images",
-                |d| async move { d.list_images(None::<ListImagesOptions>).await },
-                Cmd::Loaded,
+                |d| async move {
+                    let containers = ListContainersOptions { all: true, ..Default::default() };
+                    try_join(d.list_images(None::<ListImagesOptions>), d.list_containers(Some(containers))).await
+                },
+                |(images, containers)| Cmd::Loaded(images, containers),
             ),
-            Cmd::Loaded(images) => {
-                self.rows = model::rows(&images);
-                self.render();
+            Cmd::Loaded(images, containers) if images == self.images && containers == self.containers => {}
+            Cmd::Loaded(images, containers) => {
+                self.containers = containers;
+                if images != self.images {
+                    self.rows = model::rows(&images);
+                    self.images = images;
+                    if !self.rows.iter().any(|r| Some(&r.target) == self.selected.as_ref()) {
+                        self.selected = None;
+                    }
+                    self.render();
+                }
+                self.show_detail();
             }
             Cmd::PruneList(items) if items.is_empty() => self.ctx.toast("No unused images to prune"),
             Cmd::PruneList(items) => confirm(
@@ -225,13 +248,14 @@ impl Component for ImagesView {
                     items,
                     action: "Prune".into(),
                     option: None,
+                    destructive: true,
                 },
                 move |_| sender.input(Msg::DoPrune),
             ),
             Cmd::Pruned(r) => self.ctx.toast(format!(
                 "Pruned {} images, reclaimed {}",
                 r.images_deleted.map_or(0, |d| d.len()),
-                model::human_size(r.space_reclaimed.unwrap_or(0)),
+                core::format_bytes(u64::try_from(r.space_reclaimed.unwrap_or(0)).unwrap_or(0)),
             )),
             Cmd::Removed => self.ctx.toast("Image removed"),
             Cmd::Progress(line) => self.progress = line,
@@ -249,14 +273,26 @@ impl Component for ImagesView {
 
 impl ImagesView {
     fn render(&mut self) {
-        let keep = self.selected.clone();
         self.shown = self.rows.iter().filter(|r| r.matches(&self.filter)).cloned().collect();
+        self.list.block_signal(&self.on_select);
         self.list.remove_all();
         for row in &self.shown {
             self.list.append(&row_widget(row));
         }
-        if let Some(i) = self.shown.iter().position(|r| Some(&r.target) == keep.as_ref()) {
+        if let Some(i) = self.shown.iter().position(|r| Some(&r.target) == self.selected.as_ref()) {
             self.list.select_row(self.list.row_at_index(i as i32).as_ref());
+        }
+        self.list.unblock_signal(&self.on_select);
+    }
+
+    fn show_detail(&self) {
+        let image = self.selected.as_ref().and_then(|t| self.images.iter().find(|i| &i.id == t || i.repo_tags.contains(t)));
+        match (image, &self.selected) {
+            (Some(image), Some(target)) => {
+                let title = if target.starts_with("sha256:") { core::short_id(target) } else { target.clone() };
+                self.pane.show(&title, &model::image_sections(image, &self.containers));
+            }
+            _ => self.pane.clear(),
         }
     }
 
@@ -317,7 +353,7 @@ fn row_widget(row: &ImageRow) -> gtk::Box {
     let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
     text.append(&title);
     text.append(&subtitle);
-    let size = gtk::Label::builder().label(&row.size).xalign(1.0).width_chars(7).build();
+    let size = gtk::Label::builder().label(&row.size).xalign(1.0).width_chars(10).build();
     let b = gtk::Box::builder().spacing(12).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
     b.append(&text);
     b.append(&size);

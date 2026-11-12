@@ -1,12 +1,10 @@
-mod model;
-
 use std::time::Instant;
 
 use bollard::models::{ContainerInspectResponse, ContainerStatsResponse};
 use bollard::query_parameters::{InspectContainerOptions, LogsOptions, StatsOptions};
 use futures_util::StreamExt;
+use relm4::RelmRemoveAllExt;
 use relm4::adw::{self, prelude::*};
-use relm4::gtk::glib;
 use relm4::prelude::*;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
@@ -14,10 +12,24 @@ use tokio::task::JoinHandle;
 use crate::context::{AppCtx, DockerEvent, Kind};
 use crate::core;
 use crate::ui::detail;
-use model::{LogBuffer, Net, format_bytes, format_rate};
+use crate::core::details::{self as model, LogBuffer, Net};
+use crate::core::{format_bytes, format_rate};
 
 const LOG_CAP: usize = 5000;
-const NONE: &str = "—";
+const NO_VALUE: &str = "—";
+
+struct Stats {
+    cpu: String,
+    memory: String,
+    rx: String,
+    tx: String,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self { cpu: NO_VALUE.into(), memory: NO_VALUE.into(), rx: NO_VALUE.into(), tx: NO_VALUE.into() }
+    }
+}
 
 struct Task(JoinHandle<()>);
 
@@ -39,10 +51,7 @@ pub struct Details {
     log_task: Option<Task>,
     stats_task: Option<Task>,
     prev_net: Option<(Net, Instant)>,
-    cpu: String,
-    memory: String,
-    rx: String,
-    tx: String,
+    stats: Stats,
     info: gtk::Box,
     text: gtk::TextBuffer,
     text_view: gtk::TextView,
@@ -160,28 +169,28 @@ impl Component for Details {
                                     set_title: "CPU",
                                     add_suffix = &gtk::Label {
                                         #[watch]
-                                        set_label: &model.cpu,
+                                        set_label: &model.stats.cpu,
                                     },
                                 },
                                 adw::ActionRow {
                                     set_title: "Memory",
                                     add_suffix = &gtk::Label {
                                         #[watch]
-                                        set_label: &model.memory,
+                                        set_label: &model.stats.memory,
                                     },
                                 },
                                 adw::ActionRow {
                                     set_title: "Network RX",
                                     add_suffix = &gtk::Label {
                                         #[watch]
-                                        set_label: &model.rx,
+                                        set_label: &model.stats.rx,
                                     },
                                 },
                                 adw::ActionRow {
                                     set_title: "Network TX",
                                     add_suffix = &gtk::Label {
                                         #[watch]
-                                        set_label: &model.tx,
+                                        set_label: &model.stats.tx,
                                     },
                                 },
                             },
@@ -233,10 +242,7 @@ impl Component for Details {
             log_task: None,
             stats_task: None,
             prev_net: None,
-            cpu: NONE.into(),
-            memory: NONE.into(),
-            rx: NONE.into(),
-            tx: NONE.into(),
+            stats: Stats::default(),
             info: gtk::Box::default(),
             text_view: gtk::TextView::with_buffer(&text),
             text,
@@ -257,12 +263,12 @@ impl Component for Details {
             }
             Msg::Search(query) => {
                 self.query = query;
-                self.render_logs();
+                self.render_logs(!self.paused);
             }
             Msg::Pause(paused) => {
                 self.paused = paused;
                 if !paused {
-                    self.render_logs();
+                    self.render_logs(true);
                 }
             }
         }
@@ -299,7 +305,7 @@ impl Details {
         self.paused = false;
         self.text.set_text("");
         self.name.clear();
-        self.clear_info();
+        self.info.remove_all();
         if self.id.is_some() {
             self.inspect(sender);
             self.start_logs(sender);
@@ -316,12 +322,6 @@ impl Details {
         );
     }
 
-    fn clear_info(&self) {
-        while let Some(child) = self.info.first_child() {
-            self.info.remove(&child);
-        }
-    }
-
     fn show_info(&mut self, inspect: &ContainerInspectResponse, sender: &ComponentSender<Self>) {
         self.name = inspect.name.as_deref().unwrap_or_default().trim_start_matches('/').to_string();
         if !inspect.state.as_ref().and_then(|s| s.running).unwrap_or(false) {
@@ -330,22 +330,7 @@ impl Details {
             self.running = true;
             self.start_stats(sender);
         }
-        self.clear_info();
-        for section in model::info_sections(inspect) {
-            let group = adw::PreferencesGroup::builder().title(section.title).build();
-            if section.rows.is_empty() {
-                group.set_description(Some("None"));
-            }
-            for (key, value) in &section.rows {
-                group.add(
-                    &adw::ActionRow::builder()
-                        .title(glib::markup_escape_text(key).as_str())
-                        .subtitle(glib::markup_escape_text(value).as_str())
-                        .build(),
-                );
-            }
-            self.info.append(&group);
-        }
+        detail::fill(&self.info, &model::info_sections(inspect));
     }
 
     fn start_logs(&mut self, sender: &ComponentSender<Self>) {
@@ -381,9 +366,11 @@ impl Details {
         self.text_view.scroll_to_mark(&self.end, 0.0, false, 0.0, 0.0);
     }
 
-    fn render_logs(&self) {
+    fn render_logs(&self, follow: bool) {
         self.text.set_text(&self.logs.text(&self.query));
-        self.text_view.scroll_to_mark(&self.end, 0.0, false, 0.0, 0.0);
+        if follow {
+            self.text_view.scroll_to_mark(&self.end, 0.0, false, 0.0, 0.0);
+        }
     }
 
     fn start_stats(&mut self, sender: &ComponentSender<Self>) {
@@ -404,22 +391,20 @@ impl Details {
         self.stats_task = None;
         self.running = false;
         self.prev_net = None;
-        for s in [&mut self.cpu, &mut self.memory, &mut self.rx, &mut self.tx] {
-            *s = NONE.into();
-        }
+        self.stats = Stats::default();
     }
 
     fn show_stats(&mut self, stats: &ContainerStatsResponse, at: Instant) {
         let Some(memory) = core::memory(stats) else { return };
-        self.cpu = format!("{:.1} %", core::cpu_percent(stats));
-        self.memory = format!("{} / {}", format_bytes(memory.used), format_bytes(memory.limit));
+        self.stats.cpu = format!("{:.1} %", core::cpu_percent(stats));
+        self.stats.memory = format!("{} / {}", format_bytes(memory.used), format_bytes(memory.limit));
         let net = model::net_totals(stats);
         let (rx_rate, tx_rate) = match self.prev_net {
             Some((prev, then)) => net.rate(prev, at.duration_since(then).as_secs_f64()),
             None => (0.0, 0.0),
         };
         self.prev_net = Some((net, at));
-        self.rx = format!("{}  ·  {}", format_rate(rx_rate), format_bytes(net.rx));
-        self.tx = format!("{}  ·  {}", format_rate(tx_rate), format_bytes(net.tx));
+        self.stats.rx = format!("{}  ·  {}", format_rate(rx_rate), format_bytes(net.rx));
+        self.stats.tx = format!("{}  ·  {}", format_rate(tx_rate), format_bytes(net.tx));
     }
 }

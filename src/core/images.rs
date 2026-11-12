@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use bollard::models::{CreateImageInfo, ImageSummary};
+use bollard::models::{ContainerSummary, CreateImageInfo, ImageSummary};
+
+use super::{Section, container_rows, format_bytes, matches, short_id};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageRow {
@@ -14,12 +16,11 @@ pub struct ImageRow {
 
 impl ImageRow {
     pub fn matches(&self, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
-        format!("{}:{} {}", self.repo, self.tag, self.id).to_lowercase().contains(&q)
+        matches(query, &[&format!("{}:{}", self.repo, self.tag), &self.id])
     }
 }
 
-const NONE: &str = "<none>";
+const UNTAGGED: &str = "<none>";
 
 pub fn rows(images: &[ImageSummary]) -> Vec<ImageRow> {
     let mut images: Vec<_> = images.iter().collect();
@@ -27,26 +28,48 @@ pub fn rows(images: &[ImageSummary]) -> Vec<ImageRow> {
     images
         .into_iter()
         .flat_map(|i| {
-            let tags: Vec<_> = i.repo_tags.iter().filter(|t| *t != "<none>:<none>").collect();
+            let tags = tags(i);
             let row = |repo: &str, tag: &str, target: &str| ImageRow {
                 repo: repo.into(),
                 tag: tag.into(),
                 id: short_id(&i.id),
-                size: human_size(i.size),
+                size: size(i.size),
                 created: date(i.created),
                 target: target.into(),
             };
             if tags.is_empty() {
-                return vec![row(NONE, NONE, &i.id)];
+                return vec![row(UNTAGGED, UNTAGGED, &i.id)];
             }
             tags.into_iter()
                 .map(|t| {
                     let (repo, tag) = split_tag(t);
-                    row(repo, tag.unwrap_or(NONE), t)
+                    row(repo, tag.unwrap_or(UNTAGGED), t)
                 })
                 .collect()
         })
         .collect()
+}
+
+fn tags(i: &ImageSummary) -> Vec<&str> {
+    i.repo_tags.iter().filter(|t| *t != "<none>:<none>").map(String::as_str).collect()
+}
+
+pub fn image_sections(i: &ImageSummary, containers: &[ContainerSummary]) -> Vec<Section> {
+    let tags = tags(i);
+    let tags = if tags.is_empty() { UNTAGGED.into() } else { tags.join(", ") };
+    let users = containers.iter().filter(|c| c.image_id.as_ref() == Some(&i.id));
+    vec![
+        Section {
+            title: "Image",
+            rows: vec![
+                ("ID".into(), i.id.clone()),
+                ("Tags".into(), tags),
+                ("Size".into(), size(i.size)),
+                ("Created".into(), date(i.created)),
+            ],
+        },
+        Section { title: "Used by", rows: container_rows(users) },
+    ]
 }
 
 pub fn unused(images: &[ImageSummary], used_ids: &[String]) -> Vec<String> {
@@ -54,15 +77,11 @@ pub fn unused(images: &[ImageSummary], used_ids: &[String]) -> Vec<String> {
         .iter()
         .filter(|i| !used_ids.contains(&i.id))
         .map(|i| {
-            let tags: Vec<_> = i.repo_tags.iter().filter(|t| *t != "<none>:<none>").map(String::as_str).collect();
-            let name = if tags.is_empty() { NONE.into() } else { tags.join(", ") };
-            format!("{name} ({}, {})", short_id(&i.id), human_size(i.size))
+            let tags = tags(i);
+            let name = if tags.is_empty() { UNTAGGED.into() } else { tags.join(", ") };
+            format!("{name} ({}, {})", short_id(&i.id), size(i.size))
         })
         .collect()
-}
-
-fn short_id(id: &str) -> String {
-    id.trim_start_matches("sha256:").chars().take(12).collect()
 }
 
 pub fn pull_args(input: &str) -> Option<(String, String)> {
@@ -78,6 +97,10 @@ pub fn pull_args(input: &str) -> Option<(String, String)> {
         }
     };
     Some((name.into(), tag.into()))
+}
+
+fn size(bytes: i64) -> String {
+    format_bytes(u64::try_from(bytes).unwrap_or(0))
 }
 
 fn split_tag(reference: &str) -> (&str, Option<&str>) {
@@ -163,27 +186,9 @@ impl PullProgress {
         let total: i64 = self.layers.values().map(|l| l.total).sum();
         if total > 0 {
             let current: i64 = self.layers.values().map(|l| l.current).sum();
-            line += &format!(", {} / {}", human_size(current), human_size(total));
+            line += &format!(", {} / {}", size(current), size(total));
         }
         line
-    }
-}
-
-const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
-
-pub fn human_size(bytes: i64) -> String {
-    let mut v = bytes as f64;
-    let mut unit = 0;
-    loop {
-        let decimals = if v < 10.0 { 2 } else if v < 100.0 { 1 } else { 0 };
-        let s = format!("{v:.decimals$}");
-        if s.parse::<f64>().is_ok_and(|r| r >= 1000.0) && unit < UNITS.len() - 1 {
-            v /= 1000.0;
-            unit += 1;
-            continue;
-        }
-        let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { &s };
-        return format!("{s}{}", UNITS[unit]);
     }
 }
 
@@ -218,7 +223,7 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].id, "bbbbbbbbbbbb");
-        assert_eq!(rows[0].size, "187MB");
+        assert_eq!(rows[0].size, "178.7 MiB");
         assert_eq!(rows[0].created, "2023-11-14");
     }
 
@@ -284,7 +289,7 @@ mod tests {
             info(Some("b"), "Extracting", Some((100, 2_000_000))),
             info(Some("b"), "Pull complete", None),
         ]);
-        assert_eq!(p.line(), "Pulling nginx:latest: 2/3 layers, 5MB / 6MB");
+        assert_eq!(p.line(), "Pulling nginx:latest: 2/3 layers, 4.8 MiB / 5.7 MiB");
     }
 
     #[test]
@@ -316,8 +321,39 @@ mod tests {
         ];
         assert_eq!(
             unused(&images, &["sha256:aaaaaaaaaaaaaaaa".into()]),
-            ["app:1.0, app:latest (bbbbbbbbbbbb, 187MB)", "<none> (cccccccccccc, 187MB)"]
+            ["app:1.0, app:latest (bbbbbbbbbbbb, 178.7 MiB)", "<none> (cccccccccccc, 178.7 MiB)"]
         );
+    }
+
+    #[test]
+    fn image_sections_show_fields_and_containers_using_it() {
+        use bollard::models::ContainerSummary;
+        let c = |name: &str, image_id: &str| ContainerSummary {
+            names: Some(vec![format!("/{name}")]),
+            image_id: Some(image_id.into()),
+            status: Some("Up 3 minutes".into()),
+            ..Default::default()
+        };
+        let img = image("sha256:bbbbbbbbbbbbbbbb", &["app:1.0", "app:latest"], 1_700_000_000);
+        let sections = image_sections(
+            &img,
+            &[c("web", "sha256:bbbbbbbbbbbbbbbb"), c("other", "sha256:aaaa"), c("api", "sha256:bbbbbbbbbbbbbbbb")],
+        );
+        let rows = |i: usize| sections[i].rows.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>();
+        assert_eq!(sections.iter().map(|s| s.title).collect::<Vec<_>>(), ["Image", "Used by"]);
+        assert_eq!(
+            rows(0),
+            [
+                ("ID", "sha256:bbbbbbbbbbbbbbbb"),
+                ("Tags", "app:1.0, app:latest"),
+                ("Size", "178.7 MiB"),
+                ("Created", "2023-11-14")
+            ]
+        );
+        assert_eq!(rows(1), [("api", "Up 3 minutes"), ("web", "Up 3 minutes")]);
+        let untagged = image_sections(&image("sha256:cc", &["<none>:<none>"], 0), &[]);
+        assert_eq!(untagged[0].rows[1], ("Tags".to_string(), "<none>".to_string()));
+        assert!(untagged[1].rows.is_empty());
     }
 
     #[test]
@@ -329,20 +365,5 @@ mod tests {
             assert_eq!(rows[0].target, "sha256:cccccccccccccccc");
             assert_eq!(rows[0].created, "1970-01-01");
         }
-    }
-
-    #[test]
-    fn sizes_use_docker_cli_units() {
-        assert_eq!(human_size(0), "0B");
-        assert_eq!(human_size(999), "999B");
-        assert_eq!(human_size(187_400_000), "187MB");
-        assert_eq!(human_size(1_157_000_000), "1.16GB");
-        assert_eq!(human_size(2_000_000_000), "2GB");
-        assert_eq!(human_size(1_500), "1.5kB");
-    }
-
-    #[test]
-    fn size_rounding_rolls_over_to_next_unit() {
-        assert_eq!(human_size(999_960_000), "1GB");
     }
 }
