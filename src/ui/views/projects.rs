@@ -3,7 +3,6 @@ use std::process::Stdio;
 
 use bollard::models::ContainerSummary;
 use bollard::query_parameters::ListContainersOptions;
-use relm4::RelmRemoveAllExt;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::glib;
 use relm4::prelude::*;
@@ -12,7 +11,7 @@ use crate::context::{AppCtx, Kind};
 use crate::core::{self, ComposeCmd, Project, ProjectRecord};
 use crate::store;
 use crate::ui::confirm::{Confirm, confirm};
-use crate::ui::detail;
+use crate::ui::{self, detail};
 
 pub struct ProjectsView {
     ctx: AppCtx,
@@ -66,7 +65,7 @@ impl ProjectsView {
 
     fn render(&self, sender: &ComponentSender<Self>) {
         self.list.block_signal(&self.on_select);
-        self.list.remove_all();
+        ui::clear(&self.list);
         for p in self.projects.iter().filter(|p| core::matches(&self.filter, &[&p.record.name])) {
             let row = row(p, core::up_count(&self.containers, &p.record.name), sender);
             self.list.append(&row);

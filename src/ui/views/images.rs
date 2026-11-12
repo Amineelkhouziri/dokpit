@@ -6,14 +6,13 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use futures_util::future::try_join;
-use relm4::RelmRemoveAllExt;
 use relm4::gtk::{glib, prelude::*};
 use relm4::prelude::*;
 
 use crate::context::{AppCtx, Kind};
 use crate::core::{self, images::{self as model, ImageRow, PullProgress}};
 use crate::ui::confirm::{Confirm, confirm};
-use crate::ui::detail;
+use crate::ui::{self, detail};
 
 pub struct ImagesView {
     ctx: AppCtx,
@@ -275,7 +274,7 @@ impl ImagesView {
     fn render(&mut self) {
         self.shown = self.rows.iter().filter(|r| r.matches(&self.filter)).cloned().collect();
         self.list.block_signal(&self.on_select);
-        self.list.remove_all();
+        ui::clear(&self.list);
         for row in &self.shown {
             self.list.append(&row_widget(row));
         }

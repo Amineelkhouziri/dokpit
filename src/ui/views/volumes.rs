@@ -6,7 +6,6 @@ use bollard::query_parameters::{
     ListContainersOptions, ListVolumesOptions, ListVolumesOptionsBuilder, RemoveVolumeOptions,
 };
 use futures_util::future::try_join;
-use relm4::RelmRemoveAllExt;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::glib::{self, markup_escape_text};
 use relm4::prelude::*;
@@ -14,7 +13,7 @@ use relm4::prelude::*;
 use crate::context::{AppCtx, Kind};
 use crate::core;
 use crate::ui::confirm::{Confirm, confirm};
-use crate::ui::detail;
+use crate::ui::{self, detail};
 
 pub struct VolumesView {
     ctx: AppCtx,
@@ -222,7 +221,7 @@ impl Component for VolumesView {
 impl VolumesView {
     fn render(&self) {
         self.list.block_signal(&self.on_select);
-        self.list.remove_all();
+        ui::clear(&self.list);
         for v in self.volumes.iter().filter(|v| core::volume_matches(v, &self.query)) {
             let row = adw::ActionRow::builder()
                 .title(markup_escape_text(&v.name).as_str())

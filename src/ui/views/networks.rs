@@ -5,7 +5,6 @@ use bollard::models::{
 };
 use bollard::query_parameters::{ListContainersOptionsBuilder, ListNetworksOptions};
 use futures_util::future::try_join;
-use relm4::RelmRemoveAllExt;
 use relm4::adw::{self, prelude::*};
 use relm4::gtk::glib;
 use relm4::prelude::*;
@@ -13,7 +12,7 @@ use relm4::prelude::*;
 use crate::context::{AppCtx, Kind};
 use crate::core;
 use crate::ui::confirm::{Confirm, confirm};
-use crate::ui::detail;
+use crate::ui::{self, detail};
 use crate::core::networks::{self as model, Member, NetRow};
 
 pub struct NetworksView {
@@ -67,7 +66,7 @@ impl NetworksView {
 
     fn render_list(&self) {
         self.list.block_signal(&self.on_select);
-        self.list.remove_all();
+        ui::clear(&self.list);
         for net in self.nets.iter().filter(|n| n.matches(&self.query)) {
             let row = adw::ActionRow::builder()
                 .title(glib::markup_escape_text(&net.name).as_str())
@@ -86,7 +85,7 @@ impl NetworksView {
         let net = self.current().map(|n| n.name.clone()).unwrap_or_default();
         let attached = model::attached(&self.containers, &net);
         if force || attached != self.attached {
-            self.members.remove_all();
+            ui::clear(&self.members);
             for m in &attached {
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&m.name).as_str())
