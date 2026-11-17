@@ -166,15 +166,29 @@ pub fn format_ports(ports: &[PortSummary]) -> String {
         .join(", ")
 }
 
+fn newest(containers: &[ContainerSummary]) -> Option<&ContainerSummary> {
+    containers.iter().reduce(|a, b| if b.created > a.created { b } else { a })
+}
+
+pub fn group_working_dir(group: &Group) -> Option<PathBuf> {
+    let dir = label(newest(&group.containers)?, WORKING_DIR)?;
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
+}
+
+pub fn state_class(counts: Option<(usize, usize)>) -> &'static str {
+    match counts {
+        Some((up, total)) if up == total => "success",
+        Some((up, _)) if up > 0 => "warning",
+        _ => "dim-label",
+    }
+}
+
 pub fn live_projects(containers: &[ContainerSummary]) -> Vec<ProjectRecord> {
     group_containers(containers)
         .into_iter()
         .filter_map(|g| {
             let name = g.project?;
-            let newest = g
-                .containers
-                .iter()
-                .reduce(|a, b| if b.created > a.created { b } else { a })?;
+            let newest = newest(&g.containers)?;
             let working_dir = PathBuf::from(label(newest, WORKING_DIR).unwrap_or_default());
             let config_files = label(newest, CONFIG_FILES)
                 .unwrap_or_default()
@@ -396,6 +410,20 @@ mod tests {
             .iter()
             .map(|c| c.id.as_deref().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn group_working_dir_comes_from_newest_container_label() {
+        let mut old = container("a", 1, &[("com.docker.compose.project", "p"), ("com.docker.compose.project.working_dir", "/old")]);
+        old.created = Some(1);
+        let mut new = container("b", 2, &[("com.docker.compose.project", "p"), ("com.docker.compose.project.working_dir", "/new")]);
+        new.created = Some(2);
+        let group = Group { project: Some("p".into()), containers: vec![old, new] };
+        assert_eq!(group_working_dir(&group), Some(PathBuf::from("/new")));
+        assert_eq!(group_working_dir(&Group { project: None, containers: vec![compose("c", "p")] }), None);
+        assert_eq!(state_class(Some((2, 2))), "success");
+        assert_eq!(state_class(Some((1, 2))), "warning");
+        assert_eq!(state_class(Some((0, 2))), "dim-label");
     }
 
     #[test]

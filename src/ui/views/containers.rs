@@ -3,6 +3,7 @@ mod group;
 mod rows;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::process::Command;
 
 use bollard::models::ContainerSummary;
@@ -16,17 +17,19 @@ use relm4::prelude::*;
 
 use crate::context::{AppCtx, Kind};
 use crate::core;
+use crate::ui::Opener;
 use crate::ui::confirm::{Confirm, confirm};
 
 pub struct ContainersView {
     ctx: AppCtx,
     containers: Vec<ContainerSummary>,
     filter: String,
-    collapsed: HashSet<Option<String>>,
+    expanded: HashSet<Option<String>>,
     selected: Option<String>,
     details: Controller<details::Details>,
     scroll: gtk::ScrolledWindow,
     groups: gtk::Box,
+    summary: gtk::Label,
 }
 
 #[derive(Debug)]
@@ -41,6 +44,7 @@ pub enum Msg {
     RemoveConfirmed { id: String, force: bool },
     Shell(String),
     Group(Op, String),
+    Open(Opener, PathBuf),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,9 +113,12 @@ impl ContainersView {
         let pos = adj.value();
         self.groups.remove_all();
         let filtering = !self.filter.trim().is_empty();
-        for group in core::filter_groups(core::group_containers(&self.containers), &self.filter) {
-            let open = filtering || !self.collapsed.contains(&group.project);
-            self.groups.append(&rows::group_header(&group, open, !filtering, sender));
+        let total = self.containers.len();
+        let up = self.containers.iter().filter(|c| core::is_up(c)).count();
+        self.summary.set_label(&format!("{total} total  ·  {up} running  ·  {} stopped", total - up));
+        for (i, group) in core::filter_groups(core::group_containers(&self.containers), &self.filter).into_iter().enumerate() {
+            let open = filtering || self.expanded.contains(&group.project);
+            self.groups.append(&rows::group_header(&group, open, !filtering, i % 2 == 1, sender));
             if open {
                 self.groups.append(&rows::group_list(&group, self.selected(), sender));
             }
@@ -149,9 +156,26 @@ impl Component for ContainersView {
             #[wrap(Some)]
             set_start_child = &gtk::Box {
                 set_orientation: gtk::Orientation::Vertical,
+                gtk::Box {
+                    set_margin_top: 20,
+                    set_margin_start: 20,
+                    set_margin_end: 20,
+                    gtk::Label {
+                        set_label: "Containers",
+                        add_css_class: "dp-title",
+                    },
+                    #[local_ref]
+                    summary -> gtk::Label {
+                        set_hexpand: true,
+                        set_halign: gtk::Align::End,
+                        set_valign: gtk::Align::End,
+                        add_css_class: "dim-label",
+                    },
+                },
                 gtk::SearchEntry {
                     set_placeholder_text: Some("Filter by name, image or project"),
-                    set_margin_all: 6,
+                    set_margin_all: 12,
+                    add_css_class: "dp-search",
                     connect_search_changed[sender] => move |e| sender.input(Msg::Filter(e.text().into())),
                 },
                 #[local_ref]
@@ -166,7 +190,8 @@ impl Component for ContainersView {
 
     fn init(ctx: AppCtx, root: Self::Root, sender: ComponentSender<Self>) -> ComponentParts<Self> {
         ctx.on_change(&sender, &[Kind::CONTAINER], Cmd::Refresh);
-        let groups = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let groups = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let summary = gtk::Label::default();
         groups.set_margin_all(12);
         let scroll = gtk::ScrolledWindow::builder().child(&groups).build();
         let details = details::Details::builder().launch(ctx.clone()).detach();
@@ -174,13 +199,15 @@ impl Component for ContainersView {
             ctx,
             containers: Vec::new(),
             filter: String::new(),
-            collapsed: HashSet::new(),
+            expanded: HashSet::new(),
             selected: None,
             details,
             scroll: scroll.clone(),
             groups,
+            summary: summary.clone(),
         };
         let scroll = &scroll;
+        let summary = &summary;
         let widgets = view_output!();
         ComponentParts { model, widgets }
     }
@@ -192,8 +219,8 @@ impl Component for ContainersView {
                 self.render(&sender);
             }
             Msg::Toggle(project) => {
-                if !self.collapsed.remove(&project) {
-                    self.collapsed.insert(project);
+                if !self.expanded.remove(&project) {
+                    self.expanded.insert(project);
                 }
                 self.render(&sender);
             }
@@ -219,6 +246,7 @@ impl Component for ContainersView {
             }
             Msg::Shell(id) => self.shell(&id),
             Msg::Group(op, project) => group::request(self, op, &project, &sender),
+            Msg::Open(opener, dir) => opener.open(&self.ctx, &dir),
         }
     }
 

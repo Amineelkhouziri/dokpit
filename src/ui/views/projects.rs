@@ -11,7 +11,7 @@ use crate::context::{AppCtx, Kind};
 use crate::core::{self, ComposeCmd, Project, ProjectRecord};
 use crate::store;
 use crate::ui::confirm::{Confirm, confirm};
-use crate::ui::{self, detail};
+use crate::ui::{self, Opener, detail};
 
 pub struct ProjectsView {
     ctx: AppCtx,
@@ -33,6 +33,7 @@ pub enum Msg {
     Compose(ComposeCmd, String),
     RunCompose(ComposeCmd, ProjectRecord),
     Forget(String),
+    Open(Opener, PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -98,11 +99,7 @@ fn row(p: &Project, counts: Option<(usize, usize)>, sender: &ComponentSender<Pro
         .subtitle_lines(0)
         .build();
     row.set_widget_name(&r.name);
-    let style = match counts {
-        Some((up, total)) if up == total => "success",
-        Some((up, _)) if up > 0 => "warning",
-        _ => "dim-label",
-    };
+    let style = core::state_class(counts);
     row.add_suffix(
         &gtk::Label::builder()
             .label(core::project_state(counts))
@@ -128,6 +125,10 @@ fn row(p: &Project, counts: Option<(usize, usize)>, sender: &ComponentSender<Pro
     button("media-playback-start-symbolic", "docker compose up -d", has_files, Msg::Compose(ComposeCmd::Up, name.clone()));
     button("media-playback-stop-symbolic", "docker compose down", p.live, Msg::Compose(ComposeCmd::Down, name.clone()));
     button("folder-download-symbolic", "docker compose pull", has_files, Msg::Compose(ComposeCmd::Pull, name.clone()));
+    for opener in [Opener::Files, Opener::Code] {
+        let (s, d) = (sender.clone(), r.working_dir.clone());
+        row.add_suffix(&opener.button(&r.working_dir, move |o| s.input(Msg::Open(o, d.clone()))));
+    }
     button("edit-delete-symbolic", "Forget (remove from remembered projects)", !p.live, Msg::Forget(name));
     row
 }
@@ -249,6 +250,7 @@ impl Component for ProjectsView {
                     })
                 });
             }
+            Msg::Open(opener, dir) => opener.open(&self.ctx, &dir),
             Msg::Forget(name) => {
                 core::forget(&mut self.remembered, &name);
                 self.save();

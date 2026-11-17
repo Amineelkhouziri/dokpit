@@ -103,10 +103,8 @@ impl Component for App {
                             set_description: Some(&model.down_reason()),
                         },
                         add_named[Some("main")] = &gtk::Box {
-                            gtk::StackSidebar {
-                                set_width_request: 180,
-                                set_stack: &views_stack,
-                            },
+                            #[local_ref]
+                            sidebar -> gtk::ListBox {},
                             gtk::Separator {},
                             #[local_ref]
                             views_stack -> gtk::Stack {
@@ -143,6 +141,29 @@ impl Component for App {
         add(views._volumes.widget(), "volumes", "Volumes");
         add(views._networks.widget(), "networks", "Networks");
         add(views._projects.widget(), "projects", "Projects");
+
+        let sidebar = gtk::ListBox::builder().css_classes(["navigation-sidebar", "dp-sidebar"]).width_request(200).build();
+        for (name, title, icon) in [
+            ("containers", "Containers", "package-x-generic-symbolic"),
+            ("images", "Images", "image-x-generic-symbolic"),
+            ("volumes", "Volumes", "drive-harddisk-symbolic"),
+            ("networks", "Networks", "network-workgroup-symbolic"),
+            ("projects", "Projects", "folder-symbolic"),
+        ] {
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            content.append(&gtk::Image::from_icon_name(icon));
+            content.append(&gtk::Label::new(Some(title)));
+            let row = gtk::ListBoxRow::builder().child(&content).build();
+            row.set_widget_name(name);
+            sidebar.append(&row);
+        }
+        let stack = views_stack.clone();
+        sidebar.connect_row_selected(move |_, row| {
+            if let Some(row) = row {
+                stack.set_visible_child_name(&row.widget_name());
+            }
+        });
+        sidebar.select_row(sidebar.row_at_index(0).as_ref());
 
         let watch_ctx = ctx.clone();
         sender.command(move |out, shutdown| shutdown.register(docker::watch(watch_ctx, out)).drop_on_shutdown());

@@ -92,7 +92,7 @@ impl Component for Details {
                     set_margin_all: 6,
                     gtk::Label {
                         set_ellipsize: gtk::pango::EllipsizeMode::Middle,
-                        add_css_class: "heading",
+                        add_css_class: "dp-detail-name",
                         #[watch]
                         set_label: &model.name,
                     },
@@ -112,6 +112,7 @@ impl Component for Details {
                             set_orientation: gtk::Orientation::Vertical,
                             set_spacing: 18,
                             set_margin_all: 12,
+                            add_css_class: "dp-info",
                         },
                     } -> {
                         set_icon_name: Some("dialog-information-symbolic"),

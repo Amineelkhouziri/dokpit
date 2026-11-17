@@ -1,0 +1,127 @@
+.dp-sidebar {
+  background: @sidebar_bg_color;
+  padding: 8px 0;
+}
+
+.dp-sidebar row {
+  margin: 2px 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+}
+
+.dp-sidebar row label {
+  font-weight: 500;
+}
+
+.dp-sidebar row:hover:not(:selected) {
+  background: alpha(@window_fg_color, 0.06);
+}
+
+.dp-sidebar row:selected {
+  background: alpha(@accent_bg_color, 0.22);
+  color: @window_fg_color;
+}
+
+.dp-title {
+  font-size: 22px;
+  font-weight: 600;
+}
+
+searchentry.dp-search {
+  min-height: 40px;
+  border-radius: 10px;
+  padding: 0 8px;
+}
+
+.dp-group {
+  min-height: 48px;
+  padding: 0 6px 0 4px;
+  border-radius: 12px;
+}
+
+.dp-group.dp-zebra {
+  background: alpha(@window_fg_color, 0.035);
+}
+
+.dp-group:hover {
+  background: alpha(@window_fg_color, 0.07);
+}
+
+.dp-dot {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 50%;
+  background: alpha(@window_fg_color, 0.35);
+}
+
+.dp-dot.running {
+  background: @success_color;
+}
+
+.dp-pill {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: alpha(@window_fg_color, 0.08);
+}
+
+.dp-pill.success {
+  background: alpha(@success_color, 0.14);
+}
+
+.dp-pill.warning {
+  background: alpha(@warning_color, 0.14);
+}
+
+.dp-chip {
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: monospace;
+  font-size: 12px;
+  background: alpha(@window_fg_color, 0.09);
+}
+
+button.dp-iconbtn {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  opacity: 0.7;
+}
+
+button.dp-iconbtn:hover {
+  opacity: 1;
+}
+
+button.dp-iconbtn.dp-danger:hover {
+  background: alpha(@error_color, 0.15);
+  color: @error_color;
+}
+
+list.dp-list {
+  border-radius: 14px;
+}
+
+list.dp-list > row:nth-child(even) {
+  background: alpha(@window_fg_color, 0.035);
+}
+
+list.dp-list > row:selected {
+  background: alpha(@accent_bg_color, 0.18);
+}
+
+.dp-detail-name {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.dp-info row .title,
+.dp-info row .subtitle {
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.dp-info row .title {
+  font-weight: 600;
+}
